@@ -1,0 +1,48 @@
+name: advanced_svg_viewer
+description: A high-performance Flutter app for viewing and analyzing large SVG files with interactive grid navigation, advanced selection tools, multiple themes, and spatial navigation system.
+version: 2.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # File handling
+  file_picker: ^10.3.3
+  
+  # SVG parsing and rendering
+  xml: ^6.6.1
+  flutter_svg: ^2.2.1
+  path_drawing: ^1.0.1
+  
+  # State management
+  provider: ^6.1.5+1
+  
+  # Math utilities
+  vector_math: ^2.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+# macOS specific configuration
+macos:
+  # Minimum macOS deployment target
+  minimumOSVersion: "10.11"
+
+# App metadata
+# Version 2.0.0 includes:
+# - Fixed grid calculations based on actual SVG dimensions
+# - Interactive grid navigation with click and hover
+# - Four theme modes (Light, Dark, Inverse, Blueprint)
+# - Dual sidebar layout (elements + tools)
+# - Advanced selection tools (by type, color, viewport, overlapping)
+# - Enhanced viewport with proper initial scaling
+# - Color extraction and display
+# - Improved UI/UX throughout
