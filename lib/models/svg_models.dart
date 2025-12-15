@@ -172,6 +172,18 @@ class SvgModel with ChangeNotifier {
     return _userGeometryLabels[sig];
   }
 
+  /// Returns user-supplied labels present in the given grid (label -> count).
+  Map<String, int> getGridUserLabelCounts(int gridId) {
+    final counts = <String, int>{};
+    for (final element in getElementsInGrid(gridId)) {
+      final label = getUserGeometryLabel(element);
+      if (label != null && label.isNotEmpty) {
+        counts[label] = (counts[label] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }
+
   int get maxGridCols => (svgWidth / _gridBoxSize).ceil();
   int get maxGridRows => (svgHeight / _gridBoxSize).ceil();
   int get totalGridCells => maxGridCols * maxGridRows;

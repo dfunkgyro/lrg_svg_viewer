@@ -22,9 +22,11 @@ class SelectionToolsSidebar extends StatelessWidget {
                 child: ListView(
                   padding: const EdgeInsets.all(8.0),
                   children: [
-                    _buildSelectionStats(context, model),
-                    const SizedBox(height: 16),
-                    _buildSelectionTools(context, model),
+                  _buildSelectionStats(context, model),
+                  const SizedBox(height: 16),
+                  _buildGridLabelStatus(context, model),
+                  const SizedBox(height: 16),
+                  _buildSelectionTools(context, model),
                     const SizedBox(height: 16),
                     _buildThemeSelector(context, themeManager),
                     const SizedBox(height: 16),
@@ -117,6 +119,56 @@ class SelectionToolsSidebar extends StatelessWidget {
               '${model.totalGridCells}',
               Icons.grid_on,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGridLabelStatus(BuildContext context, SvgModel model) {
+    final selectedGrid = model.selectedGridId;
+    if (selectedGrid == null) {
+      return const SizedBox.shrink();
+    }
+
+    final labels = model.getGridUserLabelCounts(selectedGrid);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.label, size: 16, color: Colors.blue),
+                const SizedBox(width: 8),
+                Text(
+                  'Grid $selectedGrid Labels',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (labels.isEmpty)
+              Text(
+                'No user labels in this grid yet.',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: labels.entries
+                    .map(
+                      (entry) => Chip(
+                        label: Text('${entry.key} (${entry.value})'),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    )
+                    .toList(),
+              ),
           ],
         ),
       ),
