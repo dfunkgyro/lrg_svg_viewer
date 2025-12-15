@@ -57,6 +57,9 @@ class _VirtualizedElementListState extends State<VirtualizedElementList> {
   void _navigateToGrid(int gridId) {
     final model = Provider.of<SvgModel>(context, listen: false);
     model.selectGridById(gridId);
+    if (model.recognizeTextEnabled) {
+      model.ensureGridTextRecognition(gridId);
+    }
 
     // Call the navigation callback if provided
     if (widget.onGridNavigate != null) {
@@ -192,6 +195,8 @@ class _GridGroupTile extends StatelessWidget {
     return Consumer<SvgModel>(
       builder: (context, model, _) {
         final isSelected = model.selectedGridId == gridId;
+        final recognition = model.recognitionCache[gridId];
+        final isRecognizing = model.isGridRecognitionInFlight(gridId);
 
         return Card(
           margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -200,6 +205,11 @@ class _GridGroupTile extends StatelessWidget {
           child: InkWell(
             onTap: onGridTap,
             child: ExpansionTile(
+              onExpansionChanged: (open) {
+                if (open && model.recognizeTextEnabled) {
+                  model.ensureGridTextRecognition(gridId);
+                }
+              },
               leading: GestureDetector(
                 onTap: onGridTap,
                 child: Container(
@@ -262,14 +272,101 @@ class _GridGroupTile extends StatelessWidget {
                   : Tooltip(
                       message: 'Click to navigate',
                       child: Icon(Icons.arrow_forward_ios, size: 16),
-                    ),
-              children: elements
-                  .map((element) => _ElementListTile(element: element))
-                  .toList(),
+              ),
+              children: [
+                if (model.recognizeTextEnabled)
+                  _RecognitionSummary(
+                    gridId: gridId,
+                    recognition: recognition,
+                    isLoading: isRecognizing,
+                    onRefresh: () =>
+                        model.ensureGridTextRecognition(gridId, force: true),
+                  ),
+                ...elements.map((element) => _ElementListTile(element: element)),
+              ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+class _RecognitionSummary extends StatelessWidget {
+  final int gridId;
+  final GridRecognitionResult? recognition;
+  final bool isLoading;
+  final VoidCallback onRefresh;
+
+  const _RecognitionSummary({
+    required this.gridId,
+    required this.recognition,
+    required this.isLoading,
+    required this.onRefresh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.text_fields, size: 14, color: Colors.blueGrey),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Recognized text',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (isLoading)
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                if ((recognition?.hits.isNotEmpty ?? false))
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: recognition!.hits
+                        .take(6)
+                        .map(
+                          (hit) => Chip(
+                            label: Text('${hit.text} (${(hit.confidence * 100).toInt()}%)'),
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        )
+                        .toList(),
+                  )
+                else
+                  Text(
+                    isLoading
+                        ? 'Analyzing grid $gridId...'
+                        : 'No text detected yet.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Re-run recognition',
+            onPressed: isLoading ? null : onRefresh,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -284,6 +381,9 @@ class _ElementListTile extends StatelessWidget {
     final model = Provider.of<SvgModel>(context);
     final isSelected = model.selectedElement == element;
     final isInMultiSelection = model.selectedElements.contains(element);
+    final userLabel = model.getUserGeometryLabel(element);
+    final isShape =
+        const ['polyline', 'polygon', 'path'].contains(element.tagName.toLowerCase());
 
     return ListTile(
       dense: true,
@@ -340,9 +440,26 @@ class _ElementListTile extends StatelessWidget {
         overflow: TextOverflow.ellipsis,
         style: TextStyle(fontSize: 11),
       ),
-      trailing: Text(
-        '${element.boundingBox.width.toStringAsFixed(0)}×${element.boundingBox.height.toStringAsFixed(0)}',
-        style: Theme.of(context).textTheme.bodySmall,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (userLabel != null)
+            Chip(
+              label: Text(userLabel),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          Text(
+            '${element.boundingBox.width.toStringAsFixed(0)}×${element.boundingBox.height.toStringAsFixed(0)}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          if (isShape)
+            IconButton(
+              icon: const Icon(Icons.edit_note, size: 18),
+              tooltip: 'Label similar shapes (letters/numbers)',
+              onPressed: () => _promptLabel(context, model),
+            ),
+        ],
       ),
       selected: isSelected,
       selectedTileColor: Colors.blue.withOpacity(0.15),
@@ -394,6 +511,44 @@ class _ElementListTile extends StatelessWidget {
       }
     } catch (e) {
       return Colors.grey;
+    }
+  }
+
+  Future<void> _promptLabel(BuildContext context, SvgModel model) async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Label this shape'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'Enter letter/number, e.g. A or 7',
+          ),
+          autofocus: true,
+          onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result.isNotEmpty) {
+      model.assignGeometryLabel(element, result);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Applied "$result" to matching shapes'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
     }
   }
 }

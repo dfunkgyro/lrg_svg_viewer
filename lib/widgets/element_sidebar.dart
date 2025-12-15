@@ -24,6 +24,7 @@ class ElementSidebar extends StatelessWidget {
           child: Column(
             children: [
               _buildHeader(context, model),
+              _buildRecognitionToggle(context, model),
               if (model.isParsing) const LinearProgressIndicator(),
               Expanded(
                 child: VirtualizedElementList(
@@ -116,6 +117,19 @@ class ElementSidebar extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildRecognitionToggle(BuildContext context, SvgModel model) {
+    return SwitchListTile.adaptive(
+      dense: true,
+      title: const Text('Recognize text in grids'),
+      subtitle: const Text(
+          'Hybrid: native <text>, heuristics for polylines, optional OCR per opened grid'),
+      value: model.recognizeTextEnabled,
+      onChanged: (value) {
+        model.setRecognizeTextEnabled(value);
+      },
     );
   }
 

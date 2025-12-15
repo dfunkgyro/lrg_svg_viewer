@@ -1,4 +1,7 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 
 class SvgElementData {
@@ -88,6 +91,34 @@ class GridInfo {
   });
 }
 
+class RecognizedTextHit {
+  final String text;
+  final String source; // e.g. 'text-node', 'ocr', 'polyline-heuristic'
+  final double confidence;
+  final Rect? bounds;
+
+  RecognizedTextHit({
+    required this.text,
+    required this.source,
+    required this.confidence,
+    this.bounds,
+  });
+}
+
+class GridRecognitionResult {
+  final int gridId;
+  final List<RecognizedTextHit> hits;
+  final DateTime timestamp;
+
+  GridRecognitionResult({
+    required this.gridId,
+    required this.hits,
+    required this.timestamp,
+  });
+
+  bool get isEmpty => hits.isEmpty;
+}
+
 class SvgModel with ChangeNotifier {
   String? _filePath;
   final List<SvgElementData> _elements = [];
@@ -107,6 +138,10 @@ class SvgModel with ChangeNotifier {
   int? _hoveredGridId;
   int? _pendingNavigateGridId;
   int _navigationRequestVersion = 0;
+  bool _recognizeTextEnabled = false;
+  final Map<int, GridRecognitionResult> _recognitionCache = {};
+  final Set<int> _recognitionInFlight = {};
+  final Map<String, String> _userGeometryLabels = {};
 
   // getters
   String? get filePath => _filePath;
@@ -126,6 +161,16 @@ class SvgModel with ChangeNotifier {
   int? get hoveredGridId => _hoveredGridId;
   int? get pendingNavigateGridId => _pendingNavigateGridId;
   int get navigationRequestVersion => _navigationRequestVersion;
+  bool get recognizeTextEnabled => _recognizeTextEnabled;
+  Map<int, GridRecognitionResult> get recognitionCache =>
+      Map.unmodifiable(_recognitionCache);
+  bool isGridRecognitionInFlight(int gridId) =>
+      _recognitionInFlight.contains(gridId);
+  String? getUserGeometryLabel(SvgElementData element) {
+    final sig = _geometrySignature(element);
+    if (sig == null) return null;
+    return _userGeometryLabels[sig];
+  }
 
   int get maxGridCols => (svgWidth / _gridBoxSize).ceil();
   int get maxGridRows => (svgHeight / _gridBoxSize).ceil();
@@ -146,6 +191,10 @@ class SvgModel with ChangeNotifier {
     _hoveredGridId = null;
     _pendingNavigateGridId = null;
     _navigationRequestVersion = 0;
+    _recognizeTextEnabled = false;
+    _recognitionCache.clear();
+    _recognitionInFlight.clear();
+    _userGeometryLabels.clear();
     notifyListeners();
   }
 
@@ -226,6 +275,21 @@ class SvgModel with ChangeNotifier {
   void clearSelection() {
     _selectedElement = null;
     _selectedElements.clear();
+    notifyListeners();
+  }
+
+  void setRecognizeTextEnabled(bool value) {
+    if (_recognizeTextEnabled != value) {
+      _recognizeTextEnabled = value;
+      notifyListeners();
+    }
+  }
+
+  void assignGeometryLabel(SvgElementData element, String label) {
+    final sig = _geometrySignature(element);
+    if (sig == null) return;
+    _userGeometryLabels[sig] = label.trim();
+    _recognitionCache.clear(); // force re-run on next open
     notifyListeners();
   }
 
@@ -380,4 +444,284 @@ class SvgModel with ChangeNotifier {
   Set<int> getPopulatedGridIds() {
     return _elements.map((e) => e.gridId).toSet();
   }
+
+  // Text recognition (hybrid)
+  Future<GridRecognitionResult?> ensureGridTextRecognition(
+    int gridId, {
+    bool force = false,
+  }) async {
+    if (!_recognizeTextEnabled) return _recognitionCache[gridId];
+    if (_recognitionInFlight.contains(gridId)) return _recognitionCache[gridId];
+    if (!force && _recognitionCache.containsKey(gridId)) {
+      return _recognitionCache[gridId];
+    }
+
+    _recognitionInFlight.add(gridId);
+    notifyListeners();
+
+    final elements = getElementsInGrid(gridId);
+    final hits = <RecognizedTextHit>[];
+
+    hits.addAll(_applyUserGeometryLabels(elements));
+    hits.addAll(_extractTextNodeHits(elements));
+    hits.addAll(_guessPolylineText(elements));
+    hits.addAll(await _runOcrOnGrid(elements));
+
+    final mergedHits = _mergeHits(hits);
+    final result = GridRecognitionResult(
+      gridId: gridId,
+      hits: mergedHits,
+      timestamp: DateTime.now(),
+    );
+
+    _recognitionCache[gridId] = result;
+    _recognitionInFlight.remove(gridId);
+    notifyListeners();
+    return result;
+  }
+
+  List<RecognizedTextHit> _extractTextNodeHits(List<SvgElementData> elements) {
+    final hits = <RecognizedTextHit>[];
+    final textElements =
+        elements.where((e) => e.tagName.toLowerCase() == 'text').toList();
+
+    for (final element in textElements) {
+      final textContent = _extractTextContent(element.xmlSnippet);
+      if (textContent.isNotEmpty) {
+        hits.add(
+          RecognizedTextHit(
+            text: textContent,
+            source: 'text-node',
+            confidence: 0.95,
+            bounds: element.boundingBox,
+          ),
+        );
+      }
+    }
+    return hits;
+  }
+
+  String _extractTextContent(String snippet) {
+    final buffer = StringBuffer();
+    final textMatches = RegExp(r'>([^<>]+)<').allMatches(snippet);
+    for (final m in textMatches) {
+      buffer.write(m.group(1)?.trim());
+      buffer.write(' ');
+    }
+    return buffer.toString().trim();
+  }
+
+  List<RecognizedTextHit> _guessPolylineText(List<SvgElementData> elements) {
+    final hits = <RecognizedTextHit>[];
+    final candidates = elements.where((e) {
+      final t = e.tagName.toLowerCase();
+      return t == 'polyline' || t == 'polygon' || t == 'path';
+    });
+
+    for (final element in candidates) {
+      final guess = _guessCharacterFromGeometry(element);
+      if (guess != null) {
+        hits.add(
+          RecognizedTextHit(
+            text: guess.text,
+            source: 'polyline-heuristic',
+            confidence: guess.confidence,
+            bounds: element.boundingBox,
+          ),
+        );
+      }
+    }
+    return hits;
+  }
+
+  _HeuristicGuess? _guessCharacterFromGeometry(SvgElementData element) {
+    final box = element.boundingBox;
+    if (box.width <= 0 || box.height <= 0) return null;
+
+    final aspect = box.width / box.height;
+    final isTall = aspect < 0.6;
+    final isWide = aspect > 1.6;
+    final isSquareish = aspect > 0.7 && aspect < 1.3;
+
+    final pointCount = _countPolylinePoints(element.xmlSnippet);
+    final hasSharpAngles =
+        _hasRightAngleSegments(element.xmlSnippet, toleranceDeg: 25);
+
+    // Basic shape-based guesses; these are intentionally soft and combined later.
+    if (isTall && !hasSharpAngles) {
+      return _HeuristicGuess(text: '1', confidence: 0.45);
+    }
+    if (isWide && hasSharpAngles) {
+      return _HeuristicGuess(text: '-', confidence: 0.35);
+    }
+    if (isSquareish && pointCount >= 4 && hasSharpAngles) {
+      return _HeuristicGuess(text: '0/O', confidence: 0.4);
+    }
+    if (isTall && hasSharpAngles && pointCount >= 6) {
+      return _HeuristicGuess(text: '4/H', confidence: 0.35);
+    }
+    if (!hasSharpAngles && isSquareish && pointCount >= 5) {
+      return _HeuristicGuess(text: 'C/G/S', confidence: 0.3);
+    }
+    return null;
+  }
+
+  int _countPolylinePoints(String snippet) {
+    final pointsMatch = RegExp(r'points\s*=\s*"([^"]+)"').firstMatch(snippet);
+    if (pointsMatch != null) {
+      final pointsString = pointsMatch.group(1)!;
+      return pointsString.split(RegExp(r'[ ,]+')).length ~/ 2;
+    }
+    // Try path data as a fallback proxy
+    final pathMatch = RegExp(r'[MLCQSZTmlcqszt]').allMatches(snippet).length;
+    return max(pathMatch, 0);
+  }
+
+  bool _hasRightAngleSegments(String snippet, {double toleranceDeg = 20}) {
+    final pointsMatch = RegExp(r'points\\s*=\\s*\"([^\"]+)\"').firstMatch(snippet);
+    if (pointsMatch == null) return false;
+    final pointsString = pointsMatch.group(1)!;
+    final coords = pointsString
+        .split(RegExp(r'\\s+'))
+        .map((pair) => pair.split(','))
+        .where((p) => p.length == 2)
+        .map((p) => Offset(
+              double.tryParse(p[0]) ?? 0,
+              double.tryParse(p[1]) ?? 0,
+            ))
+        .toList();
+    if (coords.length < 3) return false;
+
+    for (int i = 1; i < coords.length - 1; i++) {
+      final a = coords[i - 1];
+      final b = coords[i];
+      final c = coords[i + 1];
+      final v1 = Offset(b.dx - a.dx, b.dy - a.dy);
+      final v2 = Offset(c.dx - b.dx, c.dy - b.dy);
+      final dot = v1.dx * v2.dx + v1.dy * v2.dy;
+      final mag = v1.distance * v2.distance;
+      if (mag == 0) continue;
+      final cosTheta = (dot / mag).clamp(-1.0, 1.0);
+      final angleDeg = (acos(cosTheta) * 180 / pi).abs();
+      if ((angleDeg - 90).abs() <= toleranceDeg) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  List<RecognizedTextHit> _mergeHits(List<RecognizedTextHit> hits) {
+    final merged = <String, RecognizedTextHit>{};
+    for (final hit in hits) {
+      final key = hit.text.trim().toLowerCase();
+      final existing = merged[key];
+      if (existing == null || hit.confidence > existing.confidence) {
+        merged[key] = hit;
+      }
+    }
+    return merged.values.toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+  }
+
+  Future<List<RecognizedTextHit>> _runOcrOnGrid(
+    List<SvgElementData> elements,
+  ) async {
+    // Placeholder for OCR integration. With a real OCR plugin, render the grid
+    // or element bounds to an image and pass it through the engine.
+    // We keep this async to avoid blocking UI and to allow future upgrades.
+    return const <RecognizedTextHit>[];
+  }
+
+  List<RecognizedTextHit> _applyUserGeometryLabels(
+      List<SvgElementData> elements) {
+    final hits = <RecognizedTextHit>[];
+    for (final element in elements) {
+      final sig = _geometrySignature(element);
+      if (sig == null) continue;
+      final label = _userGeometryLabels[sig];
+      if (label != null && label.isNotEmpty) {
+        hits.add(RecognizedTextHit(
+          text: label,
+          source: 'user-labeled-geometry',
+          confidence: 0.99,
+          bounds: element.boundingBox,
+        ));
+      }
+    }
+    return hits;
+  }
+
+  String? _geometrySignature(SvgElementData element) {
+    final tag = element.tagName.toLowerCase();
+    List<Offset> points = [];
+
+    if (tag == 'polyline' || tag == 'polygon') {
+      points = _extractPointsFromSnippet(element.xmlSnippet);
+    } else if (tag == 'path') {
+      points = _extractPathPoints(element.xmlSnippet);
+    } else {
+      return null;
+    }
+
+    if (points.length < 2) return null;
+
+    double minX = points.first.dx, maxX = points.first.dx;
+    double minY = points.first.dy, maxY = points.first.dy;
+    for (final p in points) {
+      minX = min(minX, p.dx);
+      maxX = max(maxX, p.dx);
+      minY = min(minY, p.dy);
+      maxY = max(maxY, p.dy);
+    }
+    final width = maxX - minX;
+    final height = maxY - minY;
+    if (width == 0 || height == 0) return null;
+
+    final normalized = points
+        .map((p) => Offset(
+              (p.dx - minX) / width,
+              (p.dy - minY) / height,
+            ))
+        .map((p) =>
+            '${p.dx.toStringAsFixed(3)},${p.dy.toStringAsFixed(3)}')
+        .join(';');
+
+    final raw = '$tag|${points.length}|$normalized';
+    return md5.convert(utf8.encode(raw)).toString();
+  }
+
+  List<Offset> _extractPointsFromSnippet(String snippet) {
+    final pointsMatch = RegExp(r'points\\s*=\\s*\"([^\"]+)\"').firstMatch(snippet);
+    if (pointsMatch == null) return [];
+    final pointsString = pointsMatch.group(1)!;
+    final parts = pointsString.trim().split(RegExp(r'[\s,]+'));
+    final points = <Offset>[];
+    for (int i = 0; i + 1 < parts.length; i += 2) {
+      final x = double.tryParse(parts[i]) ?? 0;
+      final y = double.tryParse(parts[i + 1]) ?? 0;
+      points.add(Offset(x, y));
+    }
+    return points;
+  }
+
+  List<Offset> _extractPathPoints(String snippet) {
+    final dMatch = RegExp(r'd\s*=\s*"([^"]+)"').firstMatch(snippet);
+    if (dMatch == null) return [];
+    final d = dMatch.group(1)!;
+    final numMatches =
+        RegExp(r'[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?').allMatches(d);
+    final nums =
+        numMatches.map((m) => double.tryParse(m.group(0) ?? '') ?? 0).toList();
+    final points = <Offset>[];
+    for (int i = 0; i + 1 < nums.length; i += 2) {
+      points.add(Offset(nums[i], nums[i + 1]));
+    }
+    return points;
+  }
+}
+
+class _HeuristicGuess {
+  final String text;
+  final double confidence;
+  _HeuristicGuess({required this.text, required this.confidence});
 }
