@@ -590,11 +590,12 @@ class SvgModel with ChangeNotifier {
   }
 
   bool _hasRightAngleSegments(String snippet, {double toleranceDeg = 20}) {
-    final pointsMatch = RegExp(r'points\\s*=\\s*\"([^\"]+)\"').firstMatch(snippet);
+    final pointsMatch =
+        RegExp(r'points\s*=\s*"([^"]+)"').firstMatch(snippet);
     if (pointsMatch == null) return false;
     final pointsString = pointsMatch.group(1)!;
     final coords = pointsString
-        .split(RegExp(r'\\s+'))
+        .split(RegExp(r'\s+'))
         .map((pair) => pair.split(','))
         .where((p) => p.length == 2)
         .map((p) => Offset(
@@ -703,7 +704,7 @@ class SvgModel with ChangeNotifier {
   }
 
   List<Offset> _extractPointsFromSnippet(String snippet) {
-    final pointsMatch = RegExp(r'points\\s*=\\s*\"([^\"]+)\"').firstMatch(snippet);
+    final pointsMatch = RegExp(r'points\s*=\s*"([^"]+)"').firstMatch(snippet);
     if (pointsMatch == null) return [];
     final pointsString = pointsMatch.group(1)!;
     final parts = pointsString.trim().split(RegExp(r'[\s,]+'));
