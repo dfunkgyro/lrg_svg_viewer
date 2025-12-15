@@ -255,9 +255,7 @@ class IsolateManager {
           batch.add({
             'id': el.getAttribute('id') ?? 'elem_${counter++}',
             'tag': tag,
-            'xml': xmlSnippet.length > 200
-                ? '${xmlSnippet.substring(0, 200)}...'
-                : xmlSnippet,
+            'xml': xmlSnippet,
             'x': bbox.left,
             'y': bbox.top,
             'w': bbox.width,
