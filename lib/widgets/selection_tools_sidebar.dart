@@ -234,6 +234,17 @@ class SelectionToolsSidebar extends StatelessWidget {
                       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     const SizedBox(width: 8),
+                    if (seq.grids.length > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8.0),
+                        child: Text(
+                          'Grids: ${seq.grids.join(',')}',
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(color: Colors.grey[700]),
+                        ),
+                      ),
                     Expanded(
                       child: TextField(
                         controller: TextEditingController(

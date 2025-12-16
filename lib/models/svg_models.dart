@@ -145,6 +145,7 @@ class SvgModel with ChangeNotifier {
   final Map<String, String> _userGeometryLabels = {};
   final Map<String, LearnedSequence> _learnedSequences = {};
   final Map<int, List<SequenceInstance>> _gridSequences = {};
+  final List<SequenceInstance> _globalSequences = [];
   bool _autoApplyLearned = true;
   bool _confirmSequences = false;
   bool _learningLoaded = false;
@@ -323,7 +324,7 @@ class SvgModel with ChangeNotifier {
     _recognitionCache.clear(); // force re-run on next open
     _gridSequences.clear(); // force re-cluster
     _persistLearning();
-    _detectSequencesInGrid(element.gridId);
+    _detectSequencesGlobal();
     notifyListeners();
   }
 
@@ -348,6 +349,7 @@ class SvgModel with ChangeNotifier {
       updatedAt: DateTime.now(),
     );
     _persistLearning();
+    _detectSequencesGlobal();
     notifyListeners();
   }
 
@@ -402,7 +404,7 @@ class SvgModel with ChangeNotifier {
 
   void selectGridById(int gridId) {
     _selectedGridId = gridId;
-    _detectSequencesInGrid(gridId);
+    _detectSequencesGlobal();
     notifyListeners();
   }
 
@@ -528,6 +530,7 @@ class SvgModel with ChangeNotifier {
     _userGeometryLabels.clear();
     _learnedSequences.clear();
     _gridSequences.clear();
+    _globalSequences.clear();
     await _persistLearning();
     notifyListeners();
   }
@@ -546,7 +549,9 @@ class SvgModel with ChangeNotifier {
       ..clear()
       ..addAll(snapshot.sequences);
     _gridSequences.clear();
+    _globalSequences.clear();
     await _persistLearning();
+    _detectSequencesGlobal();
     notifyListeners();
   }
 
@@ -582,7 +587,7 @@ class SvgModel with ChangeNotifier {
 
     _recognitionCache[gridId] = result;
     _recognitionInFlight.remove(gridId);
-    _detectSequencesInGrid(gridId);
+    _detectSequencesGlobal();
     notifyListeners();
     return result;
   }
@@ -827,8 +832,8 @@ class SvgModel with ChangeNotifier {
     return points;
   }
 
-  void _detectSequencesInGrid(int gridId) {
-    final labeledElements = getElementsInGrid(gridId)
+  void _detectSequencesGlobal() {
+    final labeledElements = _elements
         .map((e) {
           final label = getUserGeometryLabel(e);
           if (label == null || label.isEmpty) return null;
@@ -844,7 +849,8 @@ class SvgModel with ChangeNotifier {
         .toList();
 
     if (labeledElements.isEmpty) {
-      _gridSequences.remove(gridId);
+      _gridSequences.clear();
+      _globalSequences.clear();
       return;
     }
 
@@ -891,14 +897,17 @@ class SvgModel with ChangeNotifier {
       for (final group in grouped) {
         if (group.length < 2) continue; // single labels already handled elsewhere
         final text = group.map((e) => e.label).join();
-        final description = _confirmSequences ? null : _inferDescriptionForSequence(text);
+        final description =
+            _confirmSequences ? null : _inferDescriptionForSequence(text);
         final bounds = group
             .map((e) => e.element.boundingBox)
             .reduce((a, b) => a.expandToInclude(b));
+        final grids = _gridIdsForBounds(bounds);
         sequences.add(SequenceInstance(
           sequence: text,
           description: description,
           bounds: bounds,
+          grids: grids,
         ));
         if (description != null && _autoApplyLearned) {
           _learnedSequences[text] = LearnedSequence(
@@ -910,7 +919,16 @@ class SvgModel with ChangeNotifier {
       }
     }
 
-    _gridSequences[gridId] = sequences;
+    _globalSequences
+      ..clear()
+      ..addAll(sequences);
+
+    _gridSequences.clear();
+    for (final seq in sequences) {
+      for (final g in seq.grids) {
+        _gridSequences.putIfAbsent(g, () => []).add(seq);
+      }
+    }
     _persistLearning();
   }
 
@@ -951,6 +969,25 @@ class SvgModel with ChangeNotifier {
       sequences: Map.from(_learnedSequences),
     );
   }
+
+  Set<int> _gridIdsForBounds(Rect bounds) {
+    final ids = <int>{};
+    if (gridBoxSize <= 0) return ids;
+    final minGridX = (bounds.left / gridBoxSize).floor().clamp(0, maxGridCols - 1);
+    final maxGridX =
+        (bounds.right / gridBoxSize).floor().clamp(0, maxGridCols - 1);
+    final minGridY = (bounds.top / gridBoxSize).floor().clamp(0, maxGridRows - 1);
+    final maxGridY =
+        (bounds.bottom / gridBoxSize).floor().clamp(0, maxGridRows - 1);
+
+    for (int gx = minGridX; gx <= maxGridX; gx++) {
+      for (int gy = minGridY; gy <= maxGridY; gy++) {
+        final gridId = (gy * maxGridCols) + gx + 1;
+        ids.add(gridId);
+      }
+    }
+    return ids;
+  }
 }
 
 class _HeuristicGuess {
@@ -979,10 +1016,12 @@ class SequenceInstance {
   final String sequence;
   final String? description;
   final Rect bounds;
+  final Set<int> grids;
 
   SequenceInstance({
     required this.sequence,
     required this.description,
     required this.bounds,
+    required this.grids,
   });
 }
