@@ -146,6 +146,9 @@ class SvgModel with ChangeNotifier {
   final Map<String, LearnedSequence> _learnedSequences = {};
   final Map<int, List<SequenceInstance>> _gridSequences = {};
   final List<SequenceInstance> _globalSequences = [];
+  final Map<String, LearnedComposite> _learnedComposites = {};
+  final Map<int, List<CompositeInstance>> _gridComposites = {};
+  final Map<int, List<CompositeSuggestion>> _compositeSuggestions = {};
   bool _autoApplyLearned = true;
   bool _confirmSequences = false;
   bool _learningLoaded = false;
@@ -184,6 +187,10 @@ class SvgModel with ChangeNotifier {
   }
   List<SequenceInstance> sequencesForGrid(int gridId) =>
       List.unmodifiable(_gridSequences[gridId] ?? const []);
+  List<CompositeInstance> compositesForGrid(int gridId) =>
+      List.unmodifiable(_gridComposites[gridId] ?? const []);
+  List<CompositeSuggestion> compositeSuggestionsForGrid(int gridId) =>
+      List.unmodifiable(_compositeSuggestions[gridId] ?? const []);
   bool get autoApplyLearned => _autoApplyLearned;
   bool get confirmSequences => _confirmSequences;
   bool get supabaseConfigured => _supabaseConfigured;
@@ -227,6 +234,9 @@ class SvgModel with ChangeNotifier {
     _userGeometryLabels.clear();
     _learnedSequences.clear();
     _gridSequences.clear();
+    _learnedComposites.clear();
+    _gridComposites.clear();
+    _compositeSuggestions.clear();
     notifyListeners();
   }
 
@@ -323,9 +333,34 @@ class SvgModel with ChangeNotifier {
     _userGeometryLabels[sig] = label.trim();
     _recognitionCache.clear(); // force re-run on next open
     _gridSequences.clear(); // force re-cluster
+    _gridComposites.clear();
+    _compositeSuggestions.clear();
     _persistLearning();
     _detectSequencesGlobal();
     notifyListeners();
+  }
+
+  void assignCompositeLabel(List<SvgElementData> elements, String label) {
+    if (elements.length < 2) return;
+    final signature = _compositeSignature(elements);
+    if (signature == null) return;
+    _learnedComposites[signature] = LearnedComposite(
+      signature: signature,
+      label: label.trim(),
+      partCount: elements.length,
+      updatedAt: DateTime.now(),
+    );
+    _recognitionCache.clear();
+    _gridComposites.clear();
+    _compositeSuggestions.clear();
+    _persistLearning();
+    _detectSequencesGlobal();
+    notifyListeners();
+  }
+
+  void assignCompositeLabelFromSelection(String label) {
+    if (_selectedElements.length < 2) return;
+    assignCompositeLabel(_selectedElements.toList(), label);
   }
 
   void setAutoApplyLearned(bool value) {
@@ -518,6 +553,9 @@ class SvgModel with ChangeNotifier {
     _learnedSequences
       ..clear()
       ..addAll(snapshot.sequences);
+    _learnedComposites
+      ..clear()
+      ..addAll(snapshot.composites);
     try {
       final status = await _supabaseSync.initIfPossible();
       _supabaseConfigured = status.hasConfig;
@@ -548,8 +586,13 @@ class SvgModel with ChangeNotifier {
     _learnedSequences
       ..clear()
       ..addAll(snapshot.sequences);
+    _learnedComposites
+      ..clear()
+      ..addAll(snapshot.composites);
     _gridSequences.clear();
     _globalSequences.clear();
+    _gridComposites.clear();
+    _compositeSuggestions.clear();
     await _persistLearning();
     _detectSequencesGlobal();
     notifyListeners();
@@ -577,6 +620,7 @@ class SvgModel with ChangeNotifier {
     hits.addAll(_extractTextNodeHits(elements));
     hits.addAll(_guessPolylineText(elements));
     hits.addAll(await _runOcrOnGrid(elements));
+    hits.addAll(_compositeHitsForGrid(gridId));
 
     final mergedHits = _mergeHits(hits);
     final result = GridRecognitionResult(
@@ -734,6 +778,20 @@ class SvgModel with ChangeNotifier {
     }
     return merged.values.toList()
       ..sort((a, b) => b.confidence.compareTo(a.confidence));
+  }
+
+  List<RecognizedTextHit> _compositeHitsForGrid(int gridId) {
+    final comps = _gridComposites[gridId] ?? const [];
+    return comps
+        .map(
+          (c) => RecognizedTextHit(
+            text: c.label,
+            source: 'composite',
+            confidence: 0.98,
+            bounds: c.bounds,
+          ),
+        )
+        .toList();
   }
 
   Future<List<RecognizedTextHit>> _runOcrOnGrid(
@@ -930,6 +988,70 @@ class SvgModel with ChangeNotifier {
       }
     }
     _persistLearning();
+    _detectCompositesGlobal();
+  }
+
+  void _detectCompositesGlobal() {
+    final comps = <CompositeInstance>[];
+    final suggestions = <CompositeSuggestion>[];
+    final usedSuggestions = <String>{};
+    final elements = _elements;
+
+    for (int i = 0; i < elements.length; i++) {
+      for (int j = i + 1; j < elements.length; j++) {
+        final a = elements[i];
+        final b = elements[j];
+        final bbox = a.boundingBox.expandToInclude(b.boundingBox);
+        final minDim = min(bbox.width, bbox.height);
+        final gapX = (a.boundingBox.center.dx - b.boundingBox.center.dx).abs() -
+            (a.boundingBox.width + b.boundingBox.width) / 2;
+        final gapY = (a.boundingBox.center.dy - b.boundingBox.center.dy).abs() -
+            (a.boundingBox.height + b.boundingBox.height) / 2;
+        final overlaps = a.boundingBox.overlaps(b.boundingBox);
+        final closeEnough = overlaps ||
+            gapX < minDim * 0.25 ||
+            gapY < minDim * 0.25;
+        if (!closeEnough) continue;
+
+        final sig = _compositeSignature([a, b]);
+        if (sig == null) continue;
+        final label = _learnedComposites[sig]?.label;
+        final grids = _gridIdsForBounds(bbox);
+        if (label != null) {
+          comps.add(CompositeInstance(
+            label: label,
+            bounds: bbox,
+            grids: grids,
+            partCount: 2,
+            elementIds: {a.id, b.id},
+            signature: sig,
+          ));
+        } else if (!usedSuggestions.contains(sig)) {
+          suggestions.add(
+            CompositeSuggestion(
+              elementIds: {a.id, b.id},
+              bounds: bbox,
+              partCount: 2,
+              reason: overlaps ? 'Overlapping shapes' : 'Close spacing',
+            ),
+          );
+          usedSuggestions.add(sig);
+        }
+      }
+    }
+
+    _gridComposites.clear();
+    for (final c in comps) {
+      for (final g in c.grids) {
+        _gridComposites.putIfAbsent(g, () => []).add(c);
+      }
+    }
+    _compositeSuggestions.clear();
+    for (final s in suggestions) {
+      for (final g in _gridIdsForBounds(s.bounds)) {
+        _compositeSuggestions.putIfAbsent(g, () => []).add(s);
+      }
+    }
   }
 
   String? _inferDescriptionForSequence(String sequence) {
@@ -967,6 +1089,7 @@ class SvgModel with ChangeNotifier {
           ),
       },
       sequences: Map.from(_learnedSequences),
+      composites: Map.from(_learnedComposites),
     );
   }
 
@@ -987,6 +1110,34 @@ class SvgModel with ChangeNotifier {
       }
     }
     return ids;
+  }
+
+  String? _compositeSignature(List<SvgElementData> elements) {
+    if (elements.isEmpty) return null;
+    Rect? union;
+    for (final e in elements) {
+      union = union == null ? e.boundingBox : union!.expandToInclude(e.boundingBox);
+    }
+    if (union == null) return null;
+    final components = <String>[];
+    for (final e in elements) {
+      final sig = _geometrySignature(e) ??
+          'bbox:${e.boundingBox.width.toStringAsFixed(2)}x${e.boundingBox.height.toStringAsFixed(2)}';
+      final normLeft = ((e.boundingBox.left - union.left) / union.width)
+          .clamp(-10.0, 10.0)
+          .toStringAsFixed(3);
+      final normTop = ((e.boundingBox.top - union.top) / union.height)
+          .clamp(-10.0, 10.0)
+          .toStringAsFixed(3);
+      final normW =
+          (e.boundingBox.width / union.width).clamp(0.0, 10.0).toStringAsFixed(3);
+      final normH =
+          (e.boundingBox.height / union.height).clamp(0.0, 10.0).toStringAsFixed(3);
+      components.add('${e.tagName}|$sig|$normLeft,$normTop,$normW,$normH');
+    }
+    components.sort();
+    final raw = '${components.length}|${components.join(';')}';
+    return md5.convert(utf8.encode(raw)).toString();
   }
 }
 
@@ -1023,5 +1174,37 @@ class SequenceInstance {
     required this.description,
     required this.bounds,
     required this.grids,
+  });
+}
+
+class CompositeInstance {
+  final String label;
+  final Rect bounds;
+  final Set<int> grids;
+  final int partCount;
+  final Set<String> elementIds;
+  final String signature;
+
+  CompositeInstance({
+    required this.label,
+    required this.bounds,
+    required this.grids,
+    required this.partCount,
+    required this.elementIds,
+    required this.signature,
+  });
+}
+
+class CompositeSuggestion {
+  final Set<String> elementIds;
+  final Rect bounds;
+  final int partCount;
+  final String reason;
+
+  CompositeSuggestion({
+    required this.elementIds,
+    required this.bounds,
+    required this.partCount,
+    required this.reason,
   });
 }

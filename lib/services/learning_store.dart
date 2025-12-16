@@ -57,28 +57,64 @@ class LearnedSequence {
   }
 }
 
+class LearnedComposite {
+  final String signature;
+  final String label;
+  final int partCount;
+  final DateTime updatedAt;
+
+  LearnedComposite({
+    required this.signature,
+    required this.label,
+    required this.partCount,
+    required this.updatedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'signature': signature,
+        'label': label,
+        'partCount': partCount,
+        'updatedAt': updatedAt.toIso8601String(),
+      };
+
+  static LearnedComposite fromJson(Map<String, dynamic> json) {
+    return LearnedComposite(
+      signature: json['signature'] as String,
+      label: json['label'] as String,
+      partCount: json['partCount'] as int? ?? 0,
+      updatedAt: DateTime.parse(json['updatedAt'] as String),
+    );
+  }
+}
+
 class LearningSnapshot {
   final Map<String, LearnedShape> shapes;
   final Map<String, LearnedSequence> sequences;
+  final Map<String, LearnedComposite> composites;
 
   LearningSnapshot({
     required this.shapes,
     required this.sequences,
+    required this.composites,
   });
 
   Map<String, dynamic> toJson() => {
         'shapes': shapes.map((k, v) => MapEntry(k, v.toJson())),
         'sequences': sequences.map((k, v) => MapEntry(k, v.toJson())),
+        'composites': composites.map((k, v) => MapEntry(k, v.toJson())),
       };
 
   static LearningSnapshot fromJson(Map<String, dynamic> json) {
     final shapesJson = (json['shapes'] as Map?) ?? {};
     final sequencesJson = (json['sequences'] as Map?) ?? {};
+    final compositesJson = (json['composites'] as Map?) ?? {};
     return LearningSnapshot(
       shapes: shapesJson.map(
           (key, value) => MapEntry(key as String, LearnedShape.fromJson(value))),
       sequences: sequencesJson.map((key, value) =>
           MapEntry(key as String, LearnedSequence.fromJson(value))),
+      composites: compositesJson.map((key, value) =>
+          MapEntry(key as String, LearnedComposite.fromJson(value))),
     );
   }
 }
@@ -94,12 +130,14 @@ class LearningStore {
   Future<LearningSnapshot> load() async {
     try {
       final file = await _getStoreFile();
-      if (!await file.exists()) return LearningSnapshot(shapes: {}, sequences: {});
+      if (!await file.exists()) {
+        return LearningSnapshot(shapes: {}, sequences: {}, composites: {});
+      }
       final content = await file.readAsString();
       final jsonMap = jsonDecode(content) as Map<String, dynamic>;
       return LearningSnapshot.fromJson(jsonMap);
     } catch (_) {
-      return LearningSnapshot(shapes: {}, sequences: {});
+      return LearningSnapshot(shapes: {}, sequences: {}, composites: {});
     }
   }
 
@@ -116,7 +154,9 @@ class LearningStore {
 
   Future<LearningSnapshot> importFrom(String sourcePath) async {
     final file = File(sourcePath);
-    if (!await file.exists()) return LearningSnapshot(shapes: {}, sequences: {});
+    if (!await file.exists()) {
+      return LearningSnapshot(shapes: {}, sequences: {}, composites: {});
+    }
     final content = await file.readAsString();
     final jsonMap = jsonDecode(content) as Map<String, dynamic>;
     return LearningSnapshot.fromJson(jsonMap);

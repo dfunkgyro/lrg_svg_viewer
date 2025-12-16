@@ -384,6 +384,14 @@ class _ElementListTile extends StatelessWidget {
     final userLabel = model.getUserGeometryLabel(element);
     final isShape =
         const ['polyline', 'polygon', 'path'].contains(element.tagName.toLowerCase());
+    final composites = model.compositesForGrid(element.gridId);
+    CompositeInstance? compositeMatch;
+    for (final c in composites) {
+      if (c.elementIds.contains(element.id)) {
+        compositeMatch = c;
+        break;
+      }
+    }
 
     return ListTile(
       dense: true,
@@ -448,6 +456,15 @@ class _ElementListTile extends StatelessWidget {
               label: Text(userLabel),
               visualDensity: VisualDensity.compact,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          if (compositeMatch != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 4.0),
+              child: Chip(
+                label: Text('Composite (${compositeMatch!.partCount})'),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
             ),
           Text(
             '${element.boundingBox.width.toStringAsFixed(0)}×${element.boundingBox.height.toStringAsFixed(0)}',

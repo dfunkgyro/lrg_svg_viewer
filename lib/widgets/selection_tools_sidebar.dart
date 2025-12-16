@@ -30,6 +30,8 @@ class SelectionToolsSidebar extends StatelessWidget {
                   const SizedBox(height: 16),
                   _buildSequenceStatus(context, model),
                   const SizedBox(height: 16),
+                  _buildCompositeStatus(context, model),
+                  const SizedBox(height: 16),
                   _buildLearningControls(context, model),
                   const SizedBox(height: 16),
                   _buildSelectionTools(context, model),
@@ -271,6 +273,122 @@ class SelectionToolsSidebar extends StatelessWidget {
     );
   }
 
+  Widget _buildCompositeStatus(BuildContext context, SvgModel model) {
+    final selectedGrid = model.selectedGridId;
+    if (selectedGrid == null) return const SizedBox.shrink();
+    final composites = model.compositesForGrid(selectedGrid);
+    final suggestions = model.compositeSuggestionsForGrid(selectedGrid);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.layers, size: 16, color: Colors.deepPurple),
+                const SizedBox(width: 8),
+                Text(
+                  'Composites (Grid $selectedGrid)',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (composites.isEmpty)
+              Text(
+                'No composites detected yet.',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else
+              Column(
+                children: composites
+                    .map(
+                      (c) => ListTile(
+                        dense: true,
+                        leading: Chip(
+                          label: Text('${c.partCount} parts'),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        title: Text(c.label),
+                        subtitle: c.grids.length > 1
+                            ? Text('Spans grids: ${c.grids.join(',')}')
+                            : null,
+                      ),
+                    )
+                    .toList(),
+              ),
+            if (suggestions.isNotEmpty) ...[
+              const Divider(),
+              Text(
+                'Suggestions',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+              ),
+              ...suggestions.map(
+                (s) => ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.lightbulb_outline, size: 16),
+                  title: Text('${s.partCount} parts - ${s.reason}'),
+                  trailing: TextButton(
+                    child: const Text('Label'),
+                    onPressed: () async {
+                      final controller = TextEditingController();
+                      final label = await showDialog<String>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Label composite'),
+                          content: TextField(
+                            controller: controller,
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              hintText: 'Enter label',
+                            ),
+                            onSubmitted: (value) =>
+                                Navigator.of(context).pop(value.trim()),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(),
+                              child: const Text('Cancel'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () =>
+                                  Navigator.of(context).pop(controller.text.trim()),
+                              child: const Text('Save'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (label != null && label.isNotEmpty) {
+                        final elements = model.elements
+                            .where((e) => s.elementIds.contains(e.id))
+                            .toList();
+                        model.assignCompositeLabel(elements, label);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Composite labeled "$label"'),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      }
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLearningControls(BuildContext context, SvgModel model) {
     return Card(
       child: Padding(
@@ -303,6 +421,50 @@ class SelectionToolsSidebar extends StatelessWidget {
               value: model.confirmSequences,
               onChanged: model.setConfirmSequences,
             ),
+            const SizedBox(height: 8),
+            if (model.selectedElements.length > 1)
+              ElevatedButton.icon(
+                icon: const Icon(Icons.merge_type),
+                label: Text('Merge & label ${model.selectedElements.length} selected'),
+                onPressed: () async {
+                  final controller = TextEditingController();
+                  final label = await showDialog<String>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Label composite'),
+                      content: TextField(
+                        controller: controller,
+                        autofocus: true,
+                        decoration: const InputDecoration(
+                          hintText: 'Enter label (e.g., 8 or R)',
+                        ),
+                        onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('Cancel'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+                          child: const Text('Save'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (label != null && label.isNotEmpty) {
+                    model.assignCompositeLabelFromSelection(label);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Composite labeled "$label"'),
+                          duration: const Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  }
+                },
+              ),
             const Divider(),
             Row(
               children: [
