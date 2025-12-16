@@ -1,6 +1,9 @@
 -- Supabase schema for syncing learned labels and grouped sequences
 -- Run this in your Supabase SQL editor or via psql against your project.
 
+-- Enable trigram extension (needed for the GIN trigram indexes below)
+create extension if not exists pg_trgm with schema public;
+
 -- Learned shape labels: keyed by geometry signature
 create table if not exists public.learned_shapes (
   signature text primary key,
