@@ -10,6 +10,7 @@ class ElementSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<SvgModel>(
       builder: (context, model, child) {
+        model.ensureLearningLoaded();
         return Container(
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,

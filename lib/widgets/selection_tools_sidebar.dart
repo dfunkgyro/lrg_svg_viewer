@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../models/svg_models.dart';
 import '../services/theme_manager.dart';
@@ -11,6 +12,7 @@ class SelectionToolsSidebar extends StatelessWidget {
     return Consumer<SvgModel>(
       builder: (context, model, child) {
         final themeManager = Provider.of<ThemeManager>(context);
+        model.ensureLearningLoaded();
         
         return Container(
           width: 300,
@@ -25,6 +27,10 @@ class SelectionToolsSidebar extends StatelessWidget {
                   _buildSelectionStats(context, model),
                   const SizedBox(height: 16),
                   _buildGridLabelStatus(context, model),
+                  const SizedBox(height: 16),
+                  _buildSequenceStatus(context, model),
+                  const SizedBox(height: 16),
+                  _buildLearningControls(context, model),
                   const SizedBox(height: 16),
                   _buildSelectionTools(context, model),
                     const SizedBox(height: 16),
@@ -169,6 +175,211 @@ class SelectionToolsSidebar extends StatelessWidget {
                     )
                     .toList(),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSequenceStatus(BuildContext context, SvgModel model) {
+    final selectedGrid = model.selectedGridId;
+    if (selectedGrid == null) return const SizedBox.shrink();
+    final sequences = model.sequencesForGrid(selectedGrid);
+    if (sequences.isEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Row(
+            children: [
+              const Icon(Icons.text_fields, size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'No grouped tags detected in grid $selectedGrid yet.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.text_snippet, size: 16, color: Colors.green),
+                const SizedBox(width: 8),
+                Text(
+                  'Grouped Tags (Grid $selectedGrid)',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ...sequences.map(
+              (seq) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
+                child: Row(
+                  children: [
+                    Chip(
+                      label: Text(seq.sequence),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: TextEditingController(
+                          text: seq.description ?? '',
+                        ),
+                        decoration: const InputDecoration(
+                          hintText: 'Add description',
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                        onSubmitted: (value) {
+                          model.setSequenceDescription(
+                              seq.sequence, value.trim());
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLearningControls(BuildContext context, SvgModel model) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.auto_awesome, size: 16, color: Colors.purple),
+                const SizedBox(width: 8),
+                Text(
+                  'Smart Labeling',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ],
+            ),
+            SwitchListTile.adaptive(
+              dense: true,
+              title: const Text('Auto-apply learned tags'),
+              subtitle: const Text('Disable to require confirmation before applying'),
+              value: model.autoApplyLearned,
+              onChanged: model.setAutoApplyLearned,
+            ),
+            SwitchListTile.adaptive(
+              dense: true,
+              title: const Text('Always confirm sequences'),
+              value: model.confirmSequences,
+              onChanged: model.setConfirmSequences,
+            ),
+            const Divider(),
+            Row(
+              children: [
+                Icon(
+                  model.supabaseConnected
+                      ? Icons.cloud_done
+                      : Icons.cloud_off,
+                  color: model.supabaseConnected ? Colors.green : Colors.grey,
+                  size: 18,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    model.supabaseConfigured
+                        ? (model.supabaseConnected
+                            ? 'Supabase connected'
+                            : 'Supabase configured, offline')
+                        : 'Supabase not configured',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.save_alt),
+                  label: const Text('Export learning'),
+                  onPressed: () async {
+                    final result =
+                        await FilePicker.platform.saveFile(dialogTitle: 'Export learning data');
+                    if (result != null) {
+                      await model.exportLearning(result);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Learning data exported'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.upload_file),
+                  label: const Text('Import learning'),
+                  onPressed: () async {
+                    final result = await FilePicker.platform.pickFiles(
+                      type: FileType.custom,
+                      allowedExtensions: ['json'],
+                    );
+                    if (result != null && result.files.isNotEmpty) {
+                      final path = result.files.first.path;
+                      if (path != null) {
+                        await model.importLearning(path);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Learning data imported'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      }
+                    }
+                  },
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.delete),
+                  label: const Text('Clear learning'),
+                  onPressed: () async {
+                    await model.clearLearning();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Learning data cleared'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  },
+                ),
+              ],
+            ),
           ],
         ),
       ),

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import '../services/learning_store.dart';
 
 class SvgElementData {
   final String id;
@@ -142,6 +143,15 @@ class SvgModel with ChangeNotifier {
   final Map<int, GridRecognitionResult> _recognitionCache = {};
   final Set<int> _recognitionInFlight = {};
   final Map<String, String> _userGeometryLabels = {};
+  final Map<String, LearnedSequence> _learnedSequences = {};
+  final Map<int, List<SequenceInstance>> _gridSequences = {};
+  bool _autoApplyLearned = true;
+  bool _confirmSequences = false;
+  bool _learningLoaded = false;
+  bool _supabaseConfigured = false;
+  bool _supabaseConnected = false;
+  final LearningStore _learningStore = LearningStore();
+  final SupabaseSyncService _supabaseSync = SupabaseSyncService();
 
   // getters
   String? get filePath => _filePath;
@@ -171,6 +181,13 @@ class SvgModel with ChangeNotifier {
     if (sig == null) return null;
     return _userGeometryLabels[sig];
   }
+  List<SequenceInstance> sequencesForGrid(int gridId) =>
+      List.unmodifiable(_gridSequences[gridId] ?? const []);
+  bool get autoApplyLearned => _autoApplyLearned;
+  bool get confirmSequences => _confirmSequences;
+  bool get supabaseConfigured => _supabaseConfigured;
+  bool get supabaseConnected => _supabaseConnected;
+  bool get learningLoaded => _learningLoaded;
 
   /// Returns user-supplied labels present in the given grid (label -> count).
   Map<String, int> getGridUserLabelCounts(int gridId) {
@@ -207,6 +224,8 @@ class SvgModel with ChangeNotifier {
     _recognitionCache.clear();
     _recognitionInFlight.clear();
     _userGeometryLabels.clear();
+    _learnedSequences.clear();
+    _gridSequences.clear();
     notifyListeners();
   }
 
@@ -302,6 +321,33 @@ class SvgModel with ChangeNotifier {
     if (sig == null) return;
     _userGeometryLabels[sig] = label.trim();
     _recognitionCache.clear(); // force re-run on next open
+    _gridSequences.clear(); // force re-cluster
+    _persistLearning();
+    _detectSequencesInGrid(element.gridId);
+    notifyListeners();
+  }
+
+  void setAutoApplyLearned(bool value) {
+    if (_autoApplyLearned != value) {
+      _autoApplyLearned = value;
+      notifyListeners();
+    }
+  }
+
+  void setConfirmSequences(bool value) {
+    if (_confirmSequences != value) {
+      _confirmSequences = value;
+      notifyListeners();
+    }
+  }
+
+  void setSequenceDescription(String sequence, String description) {
+    _learnedSequences[sequence] = LearnedSequence(
+      sequence: sequence,
+      description: description,
+      updatedAt: DateTime.now(),
+    );
+    _persistLearning();
     notifyListeners();
   }
 
@@ -356,6 +402,7 @@ class SvgModel with ChangeNotifier {
 
   void selectGridById(int gridId) {
     _selectedGridId = gridId;
+    _detectSequencesInGrid(gridId);
     notifyListeners();
   }
 
@@ -457,11 +504,58 @@ class SvgModel with ChangeNotifier {
     return _elements.map((e) => e.gridId).toSet();
   }
 
+  Future<void> ensureLearningLoaded() async {
+    if (_learningLoaded) return;
+    _learningLoaded = true;
+    final snapshot = await _learningStore.load();
+    _userGeometryLabels
+      ..clear()
+      ..addAll({
+        for (final entry in snapshot.shapes.entries) entry.key: entry.value.label
+      });
+    _learnedSequences
+      ..clear()
+      ..addAll(snapshot.sequences);
+    try {
+      final status = await _supabaseSync.initIfPossible();
+      _supabaseConfigured = status.hasConfig;
+      _supabaseConnected = status.connected;
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> clearLearning() async {
+    _userGeometryLabels.clear();
+    _learnedSequences.clear();
+    _gridSequences.clear();
+    await _persistLearning();
+    notifyListeners();
+  }
+
+  Future<void> exportLearning(String path) async {
+    final snapshot = _buildSnapshot();
+    await _learningStore.exportTo(path, snapshot);
+  }
+
+  Future<void> importLearning(String path) async {
+    final snapshot = await _learningStore.importFrom(path);
+    _userGeometryLabels
+      ..clear()
+      ..addAll({for (final e in snapshot.shapes.entries) e.key: e.value.label});
+    _learnedSequences
+      ..clear()
+      ..addAll(snapshot.sequences);
+    _gridSequences.clear();
+    await _persistLearning();
+    notifyListeners();
+  }
+
   // Text recognition (hybrid)
   Future<GridRecognitionResult?> ensureGridTextRecognition(
     int gridId, {
     bool force = false,
   }) async {
+    await ensureLearningLoaded();
     if (!_recognizeTextEnabled) return _recognitionCache[gridId];
     if (_recognitionInFlight.contains(gridId)) return _recognitionCache[gridId];
     if (!force && _recognitionCache.containsKey(gridId)) {
@@ -488,6 +582,7 @@ class SvgModel with ChangeNotifier {
 
     _recognitionCache[gridId] = result;
     _recognitionInFlight.remove(gridId);
+    _detectSequencesInGrid(gridId);
     notifyListeners();
     return result;
   }
@@ -731,10 +826,163 @@ class SvgModel with ChangeNotifier {
     }
     return points;
   }
+
+  void _detectSequencesInGrid(int gridId) {
+    final labeledElements = getElementsInGrid(gridId)
+        .map((e) {
+          final label = getUserGeometryLabel(e);
+          if (label == null || label.isEmpty) return null;
+          return _LabeledElement(
+            element: e,
+            label: label,
+            center: e.boundingBox.center,
+            width: e.boundingBox.width,
+            height: e.boundingBox.height,
+          );
+        })
+        .whereType<_LabeledElement>()
+        .toList();
+
+    if (labeledElements.isEmpty) {
+      _gridSequences.remove(gridId);
+      return;
+    }
+
+    labeledElements.sort((a, b) => a.center.dy.compareTo(b.center.dy));
+
+    final sequences = <SequenceInstance>[];
+    int index = 0;
+    while (index < labeledElements.length) {
+      final base = labeledElements[index];
+      final row = <_LabeledElement>[base];
+      index++;
+      while (index < labeledElements.length) {
+        final next = labeledElements[index];
+        final tolerance =
+            max(4.0, (base.height + next.height) / 2 * 0.35); // baseline tolerance
+        if ((next.center.dy - base.center.dy).abs() <= tolerance) {
+          row.add(next);
+          index++;
+        } else {
+          break;
+        }
+      }
+
+      row.sort((a, b) => a.center.dx.compareTo(b.center.dx));
+      final avgWidth =
+          row.map((e) => e.width).fold<double>(0, (p, c) => p + c) / row.length;
+      final maxGap = avgWidth * 2;
+
+      final grouped = <List<_LabeledElement>>[];
+      var current = <_LabeledElement>[row.first];
+      for (int i = 1; i < row.length; i++) {
+        final prev = row[i - 1];
+        final curr = row[i];
+        final gap = curr.center.dx - prev.center.dx - prev.width / 2;
+        if (gap <= maxGap) {
+          current.add(curr);
+        } else {
+          grouped.add(current);
+          current = [curr];
+        }
+      }
+      grouped.add(current);
+
+      for (final group in grouped) {
+        if (group.length < 2) continue; // single labels already handled elsewhere
+        final text = group.map((e) => e.label).join();
+        final description = _confirmSequences ? null : _inferDescriptionForSequence(text);
+        final bounds = group
+            .map((e) => e.element.boundingBox)
+            .reduce((a, b) => a.expandToInclude(b));
+        sequences.add(SequenceInstance(
+          sequence: text,
+          description: description,
+          bounds: bounds,
+        ));
+        if (description != null && _autoApplyLearned) {
+          _learnedSequences[text] = LearnedSequence(
+            sequence: text,
+            description: description,
+            updatedAt: DateTime.now(),
+          );
+        }
+      }
+    }
+
+    _gridSequences[gridId] = sequences;
+    _persistLearning();
+  }
+
+  String? _inferDescriptionForSequence(String sequence) {
+    // Exact match
+    final exact = _learnedSequences[sequence];
+    if (exact != null) return exact.description;
+
+    // Prefix/similarity: reuse description from longest sequence sharing prefix
+    LearnedSequence? best;
+    for (final entry in _learnedSequences.values) {
+      if (sequence.startsWith(entry.sequence[0])) {
+        if (best == null || entry.sequence.length > best.sequence.length) {
+          best = entry;
+        }
+      }
+    }
+    return best?.description;
+  }
+
+  Future<void> _persistLearning() async {
+    if (!_learningLoaded) _learningLoaded = true;
+    final snapshot = _buildSnapshot();
+    await _learningStore.save(snapshot);
+    await _supabaseSync.syncSnapshot(snapshot);
+  }
+
+  LearningSnapshot _buildSnapshot() {
+    return LearningSnapshot(
+      shapes: {
+        for (final entry in _userGeometryLabels.entries)
+          entry.key: LearnedShape(
+            signature: entry.key,
+            label: entry.value,
+            updatedAt: DateTime.now(),
+          ),
+      },
+      sequences: Map.from(_learnedSequences),
+    );
+  }
 }
 
 class _HeuristicGuess {
   final String text;
   final double confidence;
   _HeuristicGuess({required this.text, required this.confidence});
+}
+
+class _LabeledElement {
+  final SvgElementData element;
+  final String label;
+  final Offset center;
+  final double width;
+  final double height;
+
+  _LabeledElement({
+    required this.element,
+    required this.label,
+    required this.center,
+    required this.width,
+    required this.height,
+  });
+}
+
+class SequenceInstance {
+  final String sequence;
+  final String? description;
+  final Rect bounds;
+
+  SequenceInstance({
+    required this.sequence,
+    required this.description,
+    required this.bounds,
+  });
 }
