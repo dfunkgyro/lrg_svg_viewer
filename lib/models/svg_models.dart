@@ -987,7 +987,6 @@ class SvgModel with ChangeNotifier {
         _gridSequences.putIfAbsent(g, () => []).add(seq);
       }
     }
-    _persistLearning();
     _detectCompositesGlobal();
   }
 
